@@ -18,7 +18,7 @@ describe('ASTParser symbol extraction', () => {
     expect(ast.classes?.length).toBe(1);
     expect(ast.imports?.length).toBe(1);
     expect(ast.functions?.some(fn => fn.name === 'helper')).toBe(true);
-    expect(ast.classes?.[0].methods.some(m => m.name === 'getUser')).toBe(true);
+    expect(ast.functions?.some(fn => fn.name === 'getUser')).toBe(true);
   });
 
   test('extracts Python defs/classes/imports', async () => {

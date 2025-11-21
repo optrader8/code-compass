@@ -137,9 +137,9 @@ export class PythonParser extends BaseParser {
   }
 
   private toFunction(node: SyntaxNode): FunctionDeclaration {
-    const nameNode = node.childForFieldName('name') || node.child(1);
+    const nameNode = this.childForFieldNameSafe(node, 'name') || node.namedChildren.find(c => c.type === 'identifier') || node.child(1);
     const name = nameNode ? nameNode.text : '(anonymous)';
-    const paramsNode = node.childForFieldName('parameters');
+    const paramsNode = this.childForFieldNameSafe(node, 'parameters');
     const parameters =
       paramsNode?.namedChildren
         .filter(child => child.type === 'identifier')
@@ -148,18 +148,17 @@ export class PythonParser extends BaseParser {
     return {
       name,
       parameters,
-      isAsync: !!node.childForFieldName('async'),
+      isAsync: !!this.childForFieldNameSafe(node, 'async'),
       isExported: false,
       range: this.toRange(node),
     };
   }
 
   private toClass(node: SyntaxNode): ClassDeclaration {
-    const nameNode = node.childForFieldName('name') || node.child(1);
+    const nameNode = this.childForFieldNameSafe(node, 'name') || node.namedChildren.find(c => c.type === 'identifier') || node.child(1);
     const name = nameNode ? nameNode.text : '(anonymous)';
-    const methods = node.namedChildren
-      .filter(child => child.type === 'function_definition')
-      .map(child => this.toFunction(child));
+    const methodNodes = this.collectNodes(node, 'function_definition');
+    const methods = methodNodes.map(child => this.toFunction(child));
 
     return {
       name,
@@ -172,8 +171,8 @@ export class PythonParser extends BaseParser {
   private toImport(node: SyntaxNode): ImportStatement {
     const sourceNode =
       node.type === 'import_from_statement'
-        ? node.childForFieldName('module_name')
-        : node.childForFieldName('name');
+        ? this.childForFieldNameSafe(node, 'module_name')
+        : this.childForFieldNameSafe(node, 'name');
 
     const specifiers =
       node.namedChildren
@@ -191,6 +190,28 @@ export class PythonParser extends BaseParser {
       isDefault: false,
       range: this.toRange(node),
     };
+  }
+
+  private childForFieldNameSafe(node: SyntaxNode, field: string): SyntaxNode | null {
+    const anyNode = node as any;
+    if (typeof anyNode.childForFieldName === 'function') {
+      return anyNode.childForFieldName(field);
+    }
+    return null;
+  }
+
+  private collectNodes(root: SyntaxNode, type: string): SyntaxNode[] {
+    const results: SyntaxNode[] = [];
+    const stack: SyntaxNode[] = [root];
+    while (stack.length) {
+      const current = stack.pop();
+      if (!current) continue;
+      if (current.type === type) {
+        results.push(current);
+      }
+      stack.push(...current.namedChildren);
+    }
+    return results;
   }
 
   private toRange(node: SyntaxNode): Range {
