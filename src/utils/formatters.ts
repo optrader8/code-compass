@@ -1,5 +1,6 @@
 // src/utils/formatters.ts
 import { SearchResult } from '../types/search';
+import Table from 'cli-table3';
 
 export function formatResultsPlain(results: SearchResult[]): string {
   if (results.length === 0) {
@@ -19,11 +20,35 @@ export function formatResultsPlain(results: SearchResult[]): string {
 }
 
 export function formatResultsJson(results: SearchResult[]): string {
-  return JSON.stringify({
-    results,
-    count: results.length,
-    timestamp: new Date().toISOString()
-  }, null, 2);
+  return JSON.stringify(
+    {
+      results,
+      count: results.length,
+      timestamp: new Date().toISOString(),
+    },
+    null,
+    2
+  );
+}
+
+export function formatResultsColor(results: SearchResult[]): string {
+  if (results.length === 0) {
+    return colorize('yellow', 'No results found.');
+  }
+
+  return results
+    .map(result => {
+      const { uri, range } = result.location;
+      const header = `${colorize('cyan', uri)}:${colorize(
+        'yellow',
+        `${range.start.line + 1}:${range.start.character + 1}`
+      )}`;
+      const body = result.context?.length
+        ? result.context.join('\n')
+        : result.content.trim();
+      return `${header}\n${colorize('gray', body)}`;
+    })
+    .join(`\n${colorize('dim', '---')}\n`);
 }
 
 export function formatResultsTable(results: SearchResult[]): string {
@@ -31,31 +56,37 @@ export function formatResultsTable(results: SearchResult[]): string {
     return 'No results found.';
   }
 
-  // Simple table formatting
-  const maxFileLength = Math.max(...results.map(r => r.location.uri.length));
-  const maxContentLength = Math.max(...results.map(r => r.content.length), 40);
-
-  let output = '';
-
-  // Header
-  output += 'File'.padEnd(maxFileLength) + '  ';
-  output += 'Line'.padEnd(6) + '  ';
-  output += 'Content'.padEnd(maxContentLength) + '\n';
-  output += '-'.repeat(maxFileLength) + '  ';
-  output += '-'.repeat(6) + '  ';
-  output += '-'.repeat(maxContentLength) + '\n';
-
-  // Rows
-  results.forEach((result, index) => {
-    const { uri, range } = result.location;
-    const filePath = uri.replace('file://', '').slice(-maxFileLength);
-    const lineNum = (range.start.line + 1).toString();
-    const content = result.content.slice(0, maxContentLength - 3) + '...';
-
-    output += filePath.padEnd(maxFileLength) + '  ';
-    output += lineNum.padEnd(6) + '  ';
-    output += content + '\n';
+  const table = new Table({
+    head: ['File', 'Line', 'Context'],
+    colWidths: [40, 10, 60],
+    wordWrap: true,
   });
 
-  return output;
+  results.forEach(result => {
+    const { uri, range } = result.location;
+    const ctx = result.context?.length
+      ? result.context.join('\n')
+      : result.content.trim();
+    table.push([
+      uri,
+      `${range.start.line + 1}:${range.start.character + 1}`,
+      ctx,
+    ]);
+  });
+
+  return table.toString();
+}
+
+function colorize(
+  color: 'cyan' | 'yellow' | 'gray' | 'dim',
+  text: string
+): string {
+  const codes: Record<string, string> = {
+    cyan: '\u001b[36m',
+    yellow: '\u001b[33m',
+    gray: '\u001b[90m',
+    dim: '\u001b[2m',
+  };
+  const reset = '\u001b[0m';
+  return `${codes[color] || ''}${text}${reset}`;
 }

@@ -9,7 +9,12 @@ import { CodeAnalyzer } from './core/analyzer';
 import { CoreEngine } from './core/engine';
 import { SearchQuery, SearchType } from './types/search';
 import { Language } from './types/ast';
-import { formatResultsJson, formatResultsPlain } from './utils/formatters';
+import {
+  formatResultsJson,
+  formatResultsPlain,
+  formatResultsColor,
+  formatResultsTable,
+} from './utils/formatters';
 
 // Start ink-based interactive CLI
 function startInteractiveCLI() {
@@ -33,7 +38,7 @@ program
   .command('interactive', { isDefault: true })
   .description('Start interactive CLI mode')
   .option('--no-interactive', 'Disable interactive mode')
-  .action((options) => {
+  .action(options => {
     if (options.interactive === false) {
       console.log('Interactive mode disabled. Use specific commands instead.');
       program.help();
@@ -79,6 +84,7 @@ program
   .option('-l, --language <language>', 'Language to search in')
   .option('-c, --context <lines>', 'Number of context lines', '3')
   .option('--json', 'Output in JSON format')
+  .option('--format <format>', 'Output format: plain|color|table|json', 'plain')
   .action(async (pattern, options) => {
     const contextLines = parseInt(options.context, 10);
     const language = resolveLanguage(options.language);
@@ -98,7 +104,22 @@ program
     };
 
     const results = await coreEngine.search(query);
-    console.log(options.json ? formatResultsJson(results) : formatResultsPlain(results));
+    if (options.json || options.format === 'json') {
+      console.log(formatResultsJson(results));
+      return;
+    }
+
+    switch (options.format) {
+      case 'color':
+        console.log(formatResultsColor(results));
+        break;
+      case 'table':
+        console.log(formatResultsTable(results));
+        break;
+      default:
+        console.log(formatResultsPlain(results));
+        break;
+    }
   });
 
 program

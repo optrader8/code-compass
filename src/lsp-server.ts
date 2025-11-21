@@ -10,7 +10,11 @@ import {
   ReferenceParams,
   DocumentSymbolParams,
   WorkspaceSymbolParams,
-  TextDocumentSyncKind
+  TextDocumentSyncKind,
+  Location,
+  Range as LspRange,
+  DocumentSymbol,
+  SymbolKind,
 } from 'vscode-languageserver/node';
 
 import { TextDocument } from 'vscode-languageserver-textdocument';
@@ -20,6 +24,10 @@ import { CacheSystem } from './utils/cache';
 import { CodeAnalyzer } from './core/analyzer';
 import { initializeConfig } from './utils/config';
 import { ParsedAST, Language, TextChange } from './types/ast';
+import { SymbolIndex } from './utils/symbol-index';
+import fg from 'fast-glob';
+import path from 'path';
+import fs from 'fs';
 
 export interface LSPServerOptions {
   stdio?: boolean;
@@ -31,9 +39,13 @@ export interface LSPServerOptions {
  * Fire-and-forget LSP bootstrapper. Uses stdio by default; host/port are reserved
  * for future TCP transport support.
  */
-export async function startLSPServer(_options: LSPServerOptions): Promise<void> {
+export async function startLSPServer(
+  _options: LSPServerOptions
+): Promise<void> {
   const connection = createConnection(ProposedFeatures.all);
-  const documents: TextDocuments<TextDocument> = new TextDocuments(TextDocument);
+  const documents: TextDocuments<TextDocument> = new TextDocuments(
+    TextDocument
+  );
 
   let hasConfigurationCapability = false;
   let hasWorkspaceFolderCapability = false;
@@ -44,13 +56,18 @@ export async function startLSPServer(_options: LSPServerOptions): Promise<void> 
   const codeAnalyzer = new CodeAnalyzer(cacheSystem);
   const coreEngine = new CoreEngine(astParser, codeAnalyzer, cacheSystem);
   const documentAsts = new Map<string, ParsedAST>();
+  const symbolIndex = new SymbolIndex();
 
   connection.onInitialize((params: InitializeParams): InitializeResult => {
     console.log('Code Compass LSP Server initializing...');
 
     const capabilities = params.capabilities;
-    hasConfigurationCapability = !!(capabilities.workspace && capabilities.workspace.configuration);
-    hasWorkspaceFolderCapability = !!(capabilities.workspace && capabilities.workspace.workspaceFolders);
+    hasConfigurationCapability = !!(
+      capabilities.workspace && capabilities.workspace.configuration
+    );
+    hasWorkspaceFolderCapability = !!(
+      capabilities.workspace && capabilities.workspace.workspaceFolders
+    );
 
     const result: InitializeResult = {
       capabilities: {
@@ -63,26 +80,30 @@ export async function startLSPServer(_options: LSPServerOptions): Promise<void> 
         experimental: {
           codeMetrics: true,
           semanticSearch: true,
-          structuralPatterns: true
-        }
-      }
+          structuralPatterns: true,
+        },
+      },
     };
 
     if (hasWorkspaceFolderCapability) {
       result.capabilities.workspace = {
         workspaceFolders: {
-          supported: true
-        }
+          supported: true,
+        },
       };
     }
 
     console.log('Code Compass LSP Server initialized successfully');
+    void indexWorkspace(config.workspace.rootPath, config.workspace.excludePatterns || []);
     return result;
   });
 
   connection.onInitialized(() => {
     if (hasConfigurationCapability) {
-      connection.client.register(DidChangeConfigurationNotification.type, undefined);
+      connection.client.register(
+        DidChangeConfigurationNotification.type,
+        undefined
+      );
     }
     if (hasWorkspaceFolderCapability) {
       connection.workspace.onDidChangeWorkspaceFolders(_event => {
@@ -112,13 +133,22 @@ export async function startLSPServer(_options: LSPServerOptions): Promise<void> 
 
     const ast = documentAsts.get(params.textDocument.uri);
     if (ast) {
-      const symbol = findSymbolAtPosition(ast, params.position.line, params.position.character);
+      const symbol = findSymbolAtPosition(
+        ast,
+        params.position.line,
+        params.position.character
+      );
       if (symbol) {
+        const metrics = codeAnalyzer ? undefined : undefined;
         return {
           contents: {
             kind: 'markdown',
-            value: `**${symbol.kind}** ${symbol.name}\n\nLines ${symbol.range.start.line + 1}-${symbol.range.end.line + 1}`
-          }
+            value: [
+              `**${symbol.kind}** ${symbol.name}`,
+              `File: ${uriToPath(params.textDocument.uri)}`,
+              `Lines ${symbol.range.start.line + 1}-${symbol.range.end.line + 1}`,
+            ].join('\n'),
+          },
         };
       }
     }
@@ -126,24 +156,96 @@ export async function startLSPServer(_options: LSPServerOptions): Promise<void> 
     return {
       contents: {
         kind: 'markdown',
-        value: 'Code Compass hover information coming soon...'
-      }
+        value: 'Code Compass hover information coming soon...',
+      },
     };
   });
 
   connection.onDefinition((params: DefinitionParams) => {
     console.log(`Definition request for ${params.textDocument.uri}`);
-    return null;
+    const ast = documentAsts.get(params.textDocument.uri);
+    const symbol = ast
+      ? findSymbolAtPosition(
+          ast,
+          params.position.line,
+          params.position.character
+        )
+      : null;
+
+    if (!symbol) return null;
+
+    const matches = findMatchingSymbols(symbol.name, symbol.kind);
+    if (!matches.length) {
+      return {
+        uri: params.textDocument.uri,
+        range: toLspRange(symbol.range),
+      };
+    }
+    return matches.map(m => ({
+      uri: m.uri,
+      range: toLspRange(m.range),
+    }));
   });
 
   connection.onReferences((params: ReferenceParams) => {
     console.log(`References request for ${params.textDocument.uri}`);
-    return [];
+    const ast = documentAsts.get(params.textDocument.uri);
+    const symbol = ast
+      ? findSymbolAtPosition(
+          ast,
+          params.position.line,
+          params.position.character
+        )
+      : null;
+
+    if (!symbol) return [];
+
+    const matches = findMatchingSymbols(symbol.name, symbol.kind);
+    // Include current occurrence at the top
+    return [
+      {
+        uri: params.textDocument.uri,
+        range: toLspRange(symbol.range),
+      },
+      ...matches.map(m => ({
+        uri: m.uri,
+        range: toLspRange(m.range),
+      })),
+    ];
   });
 
   connection.onDocumentSymbol((params: DocumentSymbolParams) => {
     console.log(`Document symbol request for ${params.textDocument.uri}`);
-    return [];
+    const ast = documentAsts.get(params.textDocument.uri);
+    if (!ast) return [];
+
+    const symbols: DocumentSymbol[] = [];
+
+    (ast.classes || []).forEach(cls =>
+      symbols.push({
+        name: cls.name,
+        kind: SymbolKind.Class,
+        range: toLspRange(cls.range),
+        selectionRange: toLspRange(cls.range),
+        children: (cls.methods || []).map(m => ({
+          name: m.name,
+          kind: SymbolKind.Method,
+          range: toLspRange(m.range),
+          selectionRange: toLspRange(m.range),
+        })),
+      })
+    );
+
+    (ast.functions || []).forEach(fn =>
+      symbols.push({
+        name: fn.name,
+        kind: SymbolKind.Function,
+        range: toLspRange(fn.range),
+        selectionRange: toLspRange(fn.range),
+      })
+    );
+
+    return symbols;
   });
 
   connection.onWorkspaceSymbol((params: WorkspaceSymbolParams) => {
@@ -164,15 +266,22 @@ export async function startLSPServer(_options: LSPServerOptions): Promise<void> 
       const lastLine = lines.length ? lines[lines.length - 1] : '';
       const change: TextChange = {
         start: { line: 0, character: 0 },
-        end: { line: Math.max(0, lines.length - 1), character: lastLine.length },
-        newText: document.getText()
+        end: {
+          line: Math.max(0, lines.length - 1),
+          character: lastLine.length,
+        },
+        newText: document.getText(),
       };
 
       const updated = await astParser.updateAST(existingAst, [change]);
       updated.filePath = filePath;
       documentAsts.set(document.uri, updated);
     } else {
-      const language = detectLanguageFromPath(filePath, astParser, config.workspace.supportedLanguages);
+      const language = detectLanguageFromPath(
+        filePath,
+        astParser,
+        config.workspace.supportedLanguages
+      );
       const parsed = await astParser.parseContent(document.getText(), language);
       parsed.filePath = filePath;
       documentAsts.set(document.uri, parsed);
@@ -190,7 +299,11 @@ export async function startLSPServer(_options: LSPServerOptions): Promise<void> 
     }
   }
 
-  function detectLanguageFromPath(filePath: string, parser: ASTParser, supported: Language[]): Language {
+  function detectLanguageFromPath(
+    filePath: string,
+    parser: ASTParser,
+    supported: Language[]
+  ): Language {
     try {
       return parser.detectLanguage(filePath);
     } catch {
@@ -199,13 +312,29 @@ export async function startLSPServer(_options: LSPServerOptions): Promise<void> 
     }
   }
 
-  function findSymbolAtPosition(ast: ParsedAST, line: number, character: number) {
-    const matchInRange = <T extends { range: { start: { line: number; character: number }; end: { line: number; character: number } } }>(
+  function findSymbolAtPosition(
+    ast: ParsedAST,
+    line: number,
+    character: number
+  ) {
+    const matchInRange = <
+      T extends {
+        range: {
+          start: { line: number; character: number };
+          end: { line: number; character: number };
+        };
+      },
+    >(
       list: T[]
     ) =>
-      list.find(node =>
-        (line > node.range.start.line || (line === node.range.start.line && character >= node.range.start.character)) &&
-        (line < node.range.end.line || (line === node.range.end.line && character <= node.range.end.character))
+      list.find(
+        node =>
+          (line > node.range.start.line ||
+            (line === node.range.start.line &&
+              character >= node.range.start.character)) &&
+          (line < node.range.end.line ||
+            (line === node.range.end.line &&
+              character <= node.range.end.character))
       );
 
     const fn = matchInRange(ast.functions || []);
@@ -215,5 +344,34 @@ export async function startLSPServer(_options: LSPServerOptions): Promise<void> 
     if (cls) return { kind: 'Class', name: cls.name, range: cls.range };
 
     return null;
+  }
+
+  function toLspRange(range: {
+    start: { line: number; character: number };
+    end: { line: number; character: number };
+  }): LspRange {
+    return {
+      start: { line: range.start.line, character: range.start.character },
+      end: { line: range.end.line, character: range.end.character },
+    };
+  }
+
+  function findMatchingSymbols(name: string, kind: string) {
+    const matches: {
+      uri: string;
+      range: {
+        start: { line: number; character: number };
+        end: { line: number; character: number };
+      };
+    }[] = [];
+    for (const [uri, ast] of documentAsts.entries()) {
+      const list = kind === 'Class' ? ast.classes || [] : ast.functions || [];
+      for (const entry of list) {
+        if (entry.name === name) {
+          matches.push({ uri, range: entry.range });
+        }
+      }
+    }
+    return matches;
   }
 }
