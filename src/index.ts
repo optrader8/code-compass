@@ -83,12 +83,16 @@ program
   .option('-f, --file <pattern>', 'File pattern to search in')
   .option('-l, --language <language>', 'Language to search in')
   .option('-c, --context <lines>', 'Number of context lines', '3')
+  .option('-L, --limit <count>', 'Maximum results to return')
+  .option('-s, --sort <sort>', 'Sort results by file|score', 'file')
+  .option('--exclude <globs>', 'Comma-separated glob patterns to exclude')
   .option('--json', 'Output in JSON format')
   .option('--format <format>', 'Output format: plain|color|table|json', 'plain')
   .action(async (pattern, options) => {
     const contextLines = parseInt(options.context, 10);
     const language = resolveLanguage(options.language);
 
+    const limit = options.limit ? parseInt(options.limit, 10) : undefined;
     const query: SearchQuery = {
       pattern,
       type: (options.type as SearchType) || SearchType.Text,
@@ -99,11 +103,18 @@ program
         includeContext: true,
         regex: true,
         caseSensitive: false,
-        maxResults: undefined,
+        maxResults: Number.isNaN(limit) ? undefined : limit,
+        exclude: options.exclude
+          ? String(options.exclude)
+              .split(',')
+              .map((p: string) => p.trim())
+              .filter(Boolean)
+          : undefined,
       },
     };
 
-    const results = await coreEngine.search(query);
+    let results = await coreEngine.search(query);
+    results = sortResults(results, options.sort);
     if (options.json || options.format === 'json') {
       console.log(formatResultsJson(results));
       return;
@@ -144,4 +155,17 @@ function resolveLanguage(input?: string): Language | undefined {
   return (Object.values(Language) as string[]).includes(normalized)
     ? (normalized as Language)
     : undefined;
+}
+
+function sortResults(results: any[], sort: string) {
+  if (sort === 'score') {
+    return [...results].sort((a, b) => (b.score || 0) - (a.score || 0));
+  }
+  // default: sort by file then line
+  return [...results].sort((a, b) => {
+    if (a.location.uri === b.location.uri) {
+      return a.location.range.start.line - b.location.range.start.line;
+    }
+    return a.location.uri.localeCompare(b.location.uri);
+  });
 }

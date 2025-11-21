@@ -28,6 +28,7 @@ import { SymbolIndex } from './utils/symbol-index';
 import fg from 'fast-glob';
 import path from 'path';
 import fs from 'fs';
+import { FileWatcher } from './utils/file-watcher';
 
 export interface LSPServerOptions {
   stdio?: boolean;
@@ -57,6 +58,15 @@ export async function startLSPServer(
   const coreEngine = new CoreEngine(astParser, codeAnalyzer, cacheSystem);
   const documentAsts = new Map<string, ParsedAST>();
   const symbolIndex = new SymbolIndex();
+  const watcher = new FileWatcher({
+    ignore: config.workspace.excludePatterns || [
+      'node_modules',
+      '.git',
+      'dist',
+    ],
+    interval: 3000,
+    ignoreInitial: true,
+  });
 
   connection.onInitialize((params: InitializeParams): InitializeResult => {
     console.log('Code Compass LSP Server initializing...');
@@ -94,7 +104,10 @@ export async function startLSPServer(
     }
 
     console.log('Code Compass LSP Server initialized successfully');
-    void indexWorkspace(config.workspace.rootPath, config.workspace.excludePatterns || []);
+    void indexWorkspace(
+      config.workspace.rootPath,
+      config.workspace.excludePatterns || []
+    );
     return result;
   });
 
@@ -110,6 +123,28 @@ export async function startLSPServer(
         console.log('Workspace folder change event received');
       });
     }
+
+    // Start watcher for incremental index updates
+    watcher.on('change', async event => {
+      const uri = pathToUri(event.filePath);
+      if (event.eventType === 'delete') {
+        symbolIndex.removeUri(uri);
+        documentAsts.delete(uri);
+        await cacheSystem.invalidate(uri);
+        return;
+      }
+      try {
+        const ast = await astParser.parseFile(event.filePath);
+        documentAsts.set(uri, ast);
+        symbolIndex.addFromAST(uri, ast);
+      } catch (error) {
+        console.warn(`Watcher failed to parse ${event.filePath}:`, error);
+      }
+    });
+
+    watcher
+      .watch(config.workspace.rootPath)
+      .catch(err => console.warn('File watcher failed:', err));
   });
 
   documents.onDidChangeContent(change => {
@@ -124,6 +159,7 @@ export async function startLSPServer(
     documentAsts.delete(event.document.uri);
     const filePath = uriToPath(event.document.uri);
     void cacheSystem.invalidatePattern(filePath);
+    symbolIndex.removeUri(event.document.uri);
   });
 
   connection.onHover((params: HoverParams) => {
@@ -139,7 +175,12 @@ export async function startLSPServer(
         params.position.character
       );
       if (symbol) {
-        const metrics = codeAnalyzer ? undefined : undefined;
+        const importsCount = ast.imports ? ast.imports.length : 0;
+        const complexityHint =
+          ast.functions?.find(fn => fn.name === symbol.name)?.range ===
+          symbol.range
+            ? '-'
+            : '';
         return {
           contents: {
             kind: 'markdown',
@@ -147,6 +188,8 @@ export async function startLSPServer(
               `**${symbol.kind}** ${symbol.name}`,
               `File: ${uriToPath(params.textDocument.uri)}`,
               `Lines ${symbol.range.start.line + 1}-${symbol.range.end.line + 1}`,
+              `Imports in file: ${importsCount}`,
+              complexityHint ? `Complexity: ${complexityHint}` : '',
             ].join('\n'),
           },
         };
@@ -276,6 +319,7 @@ export async function startLSPServer(
       const updated = await astParser.updateAST(existingAst, [change]);
       updated.filePath = filePath;
       documentAsts.set(document.uri, updated);
+      symbolIndex.addFromAST(document.uri, updated);
     } else {
       const language = detectLanguageFromPath(
         filePath,
@@ -285,6 +329,7 @@ export async function startLSPServer(
       const parsed = await astParser.parseContent(document.getText(), language);
       parsed.filePath = filePath;
       documentAsts.set(document.uri, parsed);
+      symbolIndex.addFromAST(document.uri, parsed);
     }
 
     await cacheSystem.invalidatePattern(filePath);
@@ -357,21 +402,45 @@ export async function startLSPServer(
   }
 
   function findMatchingSymbols(name: string, kind: string) {
-    const matches: {
-      uri: string;
-      range: {
-        start: { line: number; character: number };
-        end: { line: number; character: number };
-      };
-    }[] = [];
-    for (const [uri, ast] of documentAsts.entries()) {
-      const list = kind === 'Class' ? ast.classes || [] : ast.functions || [];
-      for (const entry of list) {
-        if (entry.name === name) {
-          matches.push({ uri, range: entry.range });
+    return symbolIndex.find(name, kind === 'Class' ? 'Class' : 'Function');
+  }
+
+  async function indexWorkspace(
+    rootPath: string,
+    exclude: string[]
+  ): Promise<void> {
+    try {
+      const patterns = ['**/*.ts', '**/*.js', '**/*.jsx', '**/*.py'];
+      const files = await fg(patterns, {
+        cwd: rootPath,
+        ignore: exclude,
+        absolute: true,
+      });
+
+      for (const file of files) {
+        try {
+          const ast = await astParser.parseFile(file);
+          const uri = pathToUri(file);
+          documentAsts.set(uri, ast);
+          symbolIndex.addFromAST(uri, ast);
+        } catch (error) {
+          console.warn(`Failed to index ${file}:`, error);
         }
       }
+
+      const stats = await cacheSystem.getStats();
+      console.log(
+        `Workspace indexed. Symbols: ${symbolIndex.size()}, Cache hitRate: ${stats.hitRate.toFixed(
+          2
+        )}`
+      );
+    } catch (error) {
+      console.error('Workspace indexing failed:', error);
     }
-    return matches;
+  }
+
+  function pathToUri(p: string): string {
+    const resolved = path.resolve(p);
+    return `file://${resolved}`;
   }
 }

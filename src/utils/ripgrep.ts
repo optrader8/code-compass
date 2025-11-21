@@ -19,7 +19,7 @@ const LANGUAGE_MAP: Record<string, Language> = {
   java: Language.Java,
   cpp: Language.Cpp,
   cxx: Language.Cpp,
-  cc: Language.Cpp
+  cc: Language.Cpp,
 };
 
 export async function runTextSearch(
@@ -45,7 +45,10 @@ export async function runTextSearch(
             const result = mapMatchToResult(parsed, query, cwd);
             results.push(result);
           }
-          if (query.options?.maxResults && results.length >= query.options.maxResults) {
+          if (
+            query.options?.maxResults &&
+            results.length >= query.options.maxResults
+          ) {
             proc.kill();
             resolve(results.slice(0, query.options.maxResults));
             return;
@@ -74,7 +77,13 @@ export async function runTextSearch(
 }
 
 function buildArgs(query: SearchQuery): string[] {
-  const args = ['--json', '--follow', '--line-number', '--column', '--no-config'];
+  const args = [
+    '--json',
+    '--follow',
+    '--line-number',
+    '--column',
+    '--no-config',
+  ];
 
   if (query.options?.contextLines && query.options.contextLines > 0) {
     args.push('--context', String(query.options.contextLines));
@@ -92,11 +101,21 @@ function buildArgs(query: SearchQuery): string[] {
     args.push('-g', query.filePattern);
   }
 
+  if (query.options?.exclude && query.options.exclude.length) {
+    for (const pattern of query.options.exclude) {
+      args.push('--glob', `!${pattern}`);
+    }
+  }
+
   args.push(query.pattern, '.');
   return args;
 }
 
-function mapMatchToResult(match: any, query: SearchQuery, cwd: string): SearchResult {
+function mapMatchToResult(
+  match: any,
+  query: SearchQuery,
+  cwd: string
+): SearchResult {
   const filePath = path.resolve(cwd, match?.data?.path?.text ?? '');
   const content = match?.data?.lines?.text ?? '';
   const startLine = Math.max(0, (match?.data?.line_number ?? 1) - 1);
@@ -105,7 +124,7 @@ function mapMatchToResult(match: any, query: SearchQuery, cwd: string): SearchRe
 
   const range: Range = {
     start: { line: startLine, character: startChar },
-    end: { line: startLine, character: endChar }
+    end: { line: startLine, character: endChar },
   };
 
   const ext = path.extname(filePath).replace('.', '').toLowerCase();
@@ -127,7 +146,7 @@ function mapMatchToResult(match: any, query: SearchQuery, cwd: string): SearchRe
   return {
     location: {
       uri: `file://${filePath}`, // Ensure proper URI format
-      range
+      range,
     },
     content: content.trim(),
     context,
@@ -137,12 +156,16 @@ function mapMatchToResult(match: any, query: SearchQuery, cwd: string): SearchRe
       language,
       symbolType: undefined,
       complexity: undefined,
-      lastModified
-    }
+      lastModified,
+    },
   };
 }
 
-function getContextLines(filePath: string, matchLine: number, contextLines: number): string[] {
+function getContextLines(
+  filePath: string,
+  matchLine: number,
+  contextLines: number
+): string[] {
   if (contextLines <= 0) return [];
 
   try {

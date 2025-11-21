@@ -15,6 +15,7 @@ export interface SearchOptions {
   contextLines?: number;
   maxResults?: number;
   includeContext?: boolean;
+  exclude?: string[];
 }
 
 export interface SearchResult {
