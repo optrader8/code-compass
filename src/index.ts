@@ -9,6 +9,12 @@ import { CodeAnalyzer } from './core/analyzer';
 import { CoreEngine } from './core/engine';
 import { SearchQuery, SearchType } from './types/search';
 import { Language } from './types/ast';
+import { formatResultsJson, formatResultsPlain } from './utils/formatters';
+
+// Start ink-based interactive CLI
+function startInteractiveCLI() {
+  require('./ui/BasicApp');
+}
 
 const program = new Command();
 const config = initializeConfig();
@@ -21,6 +27,25 @@ program
   .name('code-compass')
   .description('Advanced code search and analysis tool')
   .version('0.1.0');
+
+// Default command - start interactive CLI
+program
+  .command('interactive', { isDefault: true })
+  .description('Start interactive CLI mode')
+  .option('--no-interactive', 'Disable interactive mode')
+  .action((options) => {
+    if (options.interactive === false) {
+      console.log('Interactive mode disabled. Use specific commands instead.');
+      program.help();
+    } else {
+      startInteractiveCLI();
+    }
+  });
+
+// Add interactive mode as default when no command provided
+if (process.argv.length === 2) {
+  startInteractiveCLI();
+}
 
 program
   .command('lsp')
@@ -73,18 +98,7 @@ program
     };
 
     const results = await coreEngine.search(query);
-    if (options.json) {
-      console.log(JSON.stringify(results, null, 2));
-    } else {
-      for (const result of results) {
-        const { uri, range } = result.location;
-        console.log(
-          `${uri}:${range.start.line + 1}:${range.start.character + 1}`
-        );
-        console.log(result.content.trim());
-        console.log('---');
-      }
-    }
+    console.log(options.json ? formatResultsJson(results) : formatResultsPlain(results));
   });
 
 program

@@ -1,170 +1,219 @@
 import {
   createConnection,
-  TextDocuments,
   ProposedFeatures,
+  TextDocuments,
   InitializeParams,
-  DidChangeConfigurationNotification,
-  TextDocumentPositionParams,
-  TextDocumentSyncKind,
   InitializeResult,
+  DidChangeConfigurationNotification,
   HoverParams,
   DefinitionParams,
   ReferenceParams,
   DocumentSymbolParams,
   WorkspaceSymbolParams,
-  SymbolInformation,
-  TextDocumentIdentifier,
+  TextDocumentSyncKind
 } from 'vscode-languageserver/node';
 
 import { TextDocument } from 'vscode-languageserver-textdocument';
-
 import { CoreEngine } from './core/engine';
 import { ASTParser } from './parsers/registry';
-import { CodeAnalyzer } from './core/analyzer';
 import { CacheSystem } from './utils/cache';
+import { CodeAnalyzer } from './core/analyzer';
 import { initializeConfig } from './utils/config';
+import { ParsedAST, Language, TextChange } from './types/ast';
 
-// Define capability flags at module level to avoid scoping issues
-let hasConfigurationCapability = false;
-let hasWorkspaceFolderCapability = false;
-let hasDiagnosticRelatedInformationCapability = false;
+export interface LSPServerOptions {
+  stdio?: boolean;
+  port?: number;
+  host?: string;
+}
 
-// Create a connection for the server, using Node's IPC as a transport.
-// Also include all preview / proposed LSP features.
-const connection = createConnection(ProposedFeatures.all);
+/**
+ * Fire-and-forget LSP bootstrapper. Uses stdio by default; host/port are reserved
+ * for future TCP transport support.
+ */
+export async function startLSPServer(_options: LSPServerOptions): Promise<void> {
+  const connection = createConnection(ProposedFeatures.all);
+  const documents: TextDocuments<TextDocument> = new TextDocuments(TextDocument);
 
-// Create a simple text document manager.
-const documents: TextDocuments<TextDocument> = new TextDocuments(TextDocument);
+  let hasConfigurationCapability = false;
+  let hasWorkspaceFolderCapability = false;
 
-// Initialize the core components
-let coreEngine: CoreEngine;
-let astParser: ASTParser;
-let codeAnalyzer: CodeAnalyzer;
-let cacheSystem: CacheSystem;
-
-connection.onInitialize((params: InitializeParams) => {
-  console.log('Code Compass LSP Server initializing...');
-
-  // Initialize core components
   const config = initializeConfig();
-  cacheSystem = new CacheSystem({ max: 1000, ttl: config.cache.ttl });
-  astParser = new ASTParser(cacheSystem);
-  codeAnalyzer = new CodeAnalyzer(cacheSystem);
-  coreEngine = new CoreEngine(astParser, codeAnalyzer, cacheSystem);
+  const cacheSystem = new CacheSystem({ max: 1000, ttl: config.cache.ttl });
+  const astParser = new ASTParser(cacheSystem);
+  const codeAnalyzer = new CodeAnalyzer(cacheSystem);
+  const coreEngine = new CoreEngine(astParser, codeAnalyzer, cacheSystem);
+  const documentAsts = new Map<string, ParsedAST>();
 
-  const capabilities = params.capabilities;
+  connection.onInitialize((params: InitializeParams): InitializeResult => {
+    console.log('Code Compass LSP Server initializing...');
 
-  // Does the client support the `workspace/configuration` request?
-  // If not, we will fall back using global settings.
-  hasConfigurationCapability = !!(
-    capabilities.workspace && !!capabilities.workspace.configuration
-  );
-  hasWorkspaceFolderCapability = !!(
-    capabilities.workspace && !!capabilities.workspace.workspaceFolders
-  );
-  hasDiagnosticRelatedInformationCapability = !!(
-    capabilities.textDocument &&
-    capabilities.textDocument.publishDiagnostics &&
-    capabilities.textDocument.publishDiagnostics.relatedInformation
-  );
+    const capabilities = params.capabilities;
+    hasConfigurationCapability = !!(capabilities.workspace && capabilities.workspace.configuration);
+    hasWorkspaceFolderCapability = !!(capabilities.workspace && capabilities.workspace.workspaceFolders);
 
-  const result: InitializeResult = {
-    capabilities: {
-      textDocumentSync: TextDocumentSyncKind.Incremental,
-      // Tell the client that this server supports code completion.
-      hoverProvider: true,
-      definitionProvider: true,
-      referencesProvider: true,
-      documentSymbolProvider: true,
-      workspaceSymbolProvider: true,
-      // Add custom Code Compass capabilities
-      experimental: {
-        codeMetrics: true,
-        semanticSearch: true,
-        structuralPatterns: true,
-      },
-    },
-  };
-
-  if (hasWorkspaceFolderCapability) {
-    result.capabilities.workspace = {
-      workspaceFolders: {
-        supported: true,
-      },
+    const result: InitializeResult = {
+      capabilities: {
+        textDocumentSync: TextDocumentSyncKind.Incremental,
+        hoverProvider: true,
+        definitionProvider: true,
+        referencesProvider: true,
+        documentSymbolProvider: true,
+        workspaceSymbolProvider: true,
+        experimental: {
+          codeMetrics: true,
+          semanticSearch: true,
+          structuralPatterns: true
+        }
+      }
     };
-  }
 
-  console.log('Code Compass LSP Server initialized successfully');
-  return result;
-});
+    if (hasWorkspaceFolderCapability) {
+      result.capabilities.workspace = {
+        workspaceFolders: {
+          supported: true
+        }
+      };
+    }
 
-connection.onInitialized(() => {
-  if (hasConfigurationCapability) {
-    // Register for all configuration changes.
-    connection.client.register(
-      DidChangeConfigurationNotification.type,
-      undefined
+    console.log('Code Compass LSP Server initialized successfully');
+    return result;
+  });
+
+  connection.onInitialized(() => {
+    if (hasConfigurationCapability) {
+      connection.client.register(DidChangeConfigurationNotification.type, undefined);
+    }
+    if (hasWorkspaceFolderCapability) {
+      connection.workspace.onDidChangeWorkspaceFolders(_event => {
+        console.log('Workspace folder change event received');
+      });
+    }
+  });
+
+  documents.onDidChangeContent(change => {
+    void refreshDocumentAst(change.document);
+  });
+
+  documents.onDidOpen(event => {
+    void refreshDocumentAst(event.document);
+  });
+
+  documents.onDidClose(event => {
+    documentAsts.delete(event.document.uri);
+    const filePath = uriToPath(event.document.uri);
+    void cacheSystem.invalidatePattern(filePath);
+  });
+
+  connection.onHover((params: HoverParams) => {
+    console.log(
+      `Hover request for ${params.textDocument.uri} at ${params.position.line}:${params.position.character}`
     );
+
+    const ast = documentAsts.get(params.textDocument.uri);
+    if (ast) {
+      const symbol = findSymbolAtPosition(ast, params.position.line, params.position.character);
+      if (symbol) {
+        return {
+          contents: {
+            kind: 'markdown',
+            value: `**${symbol.kind}** ${symbol.name}\n\nLines ${symbol.range.start.line + 1}-${symbol.range.end.line + 1}`
+          }
+        };
+      }
+    }
+
+    return {
+      contents: {
+        kind: 'markdown',
+        value: 'Code Compass hover information coming soon...'
+      }
+    };
+  });
+
+  connection.onDefinition((params: DefinitionParams) => {
+    console.log(`Definition request for ${params.textDocument.uri}`);
+    return null;
+  });
+
+  connection.onReferences((params: ReferenceParams) => {
+    console.log(`References request for ${params.textDocument.uri}`);
+    return [];
+  });
+
+  connection.onDocumentSymbol((params: DocumentSymbolParams) => {
+    console.log(`Document symbol request for ${params.textDocument.uri}`);
+    return [];
+  });
+
+  connection.onWorkspaceSymbol((params: WorkspaceSymbolParams) => {
+    console.log(`Workspace symbol request: ${params.query}`);
+    return [];
+  });
+
+  documents.listen(connection);
+  connection.listen();
+
+  async function refreshDocumentAst(document: TextDocument): Promise<void> {
+    const filePath = uriToPath(document.uri);
+
+    // Build a single full-file change to feed incremental parser if an AST already exists
+    const existingAst = documentAsts.get(document.uri);
+    if (existingAst) {
+      const lines = document.getText().split(/\r?\n/);
+      const lastLine = lines.length ? lines[lines.length - 1] : '';
+      const change: TextChange = {
+        start: { line: 0, character: 0 },
+        end: { line: Math.max(0, lines.length - 1), character: lastLine.length },
+        newText: document.getText()
+      };
+
+      const updated = await astParser.updateAST(existingAst, [change]);
+      updated.filePath = filePath;
+      documentAsts.set(document.uri, updated);
+    } else {
+      const language = detectLanguageFromPath(filePath, astParser, config.workspace.supportedLanguages);
+      const parsed = await astParser.parseContent(document.getText(), language);
+      parsed.filePath = filePath;
+      documentAsts.set(document.uri, parsed);
+    }
+
+    await cacheSystem.invalidatePattern(filePath);
   }
-  if (hasWorkspaceFolderCapability) {
-    connection.workspace.onDidChangeWorkspaceFolders(_event => {
-      console.log('Workspace folder change event received');
-    });
+
+  function uriToPath(uri: string): string {
+    try {
+      const asUrl = new URL(uri);
+      return asUrl.pathname;
+    } catch {
+      return uri;
+    }
   }
-});
 
-// The content of a text document has changed. This event is emitted
-// when the text document first opened or when its content has changed.
-documents.onDidChangeContent(change => {
-  // TODO: Implement document content change handling
-  console.log(`Document changed: ${change.document.uri}`);
-});
+  function detectLanguageFromPath(filePath: string, parser: ASTParser, supported: Language[]): Language {
+    try {
+      return parser.detectLanguage(filePath);
+    } catch {
+      const fallback = supported[0] || Language.TypeScript;
+      return fallback;
+    }
+  }
 
-connection.onHover((params: HoverParams) => {
-  console.log(
-    `Hover request for ${params.textDocument.uri} at ${params.position.line}:${params.position.character}`
-  );
+  function findSymbolAtPosition(ast: ParsedAST, line: number, character: number) {
+    const matchInRange = <T extends { range: { start: { line: number; character: number }; end: { line: number; character: number } } }>(
+      list: T[]
+    ) =>
+      list.find(node =>
+        (line > node.range.start.line || (line === node.range.start.line && character >= node.range.start.character)) &&
+        (line < node.range.end.line || (line === node.range.end.line && character <= node.range.end.character))
+      );
 
-  // TODO: Implement hover functionality
-  return {
-    contents: {
-      kind: 'markdown',
-      value: 'Code Compass hover information coming soon...',
-    },
-  };
-});
+    const fn = matchInRange(ast.functions || []);
+    if (fn) return { kind: 'Function', name: fn.name, range: fn.range };
 
-connection.onDefinition((params: DefinitionParams) => {
-  console.log(`Definition request for ${params.textDocument.uri}`);
+    const cls = matchInRange(ast.classes || []);
+    if (cls) return { kind: 'Class', name: cls.name, range: cls.range };
 
-  // TODO: Implement definition functionality
-  return null;
-});
-
-connection.onReferences((params: ReferenceParams) => {
-  console.log(`References request for ${params.textDocument.uri}`);
-
-  // TODO: Implement references functionality
-  return [];
-});
-
-connection.onDocumentSymbol((params: DocumentSymbolParams) => {
-  console.log(`Document symbol request for ${params.textDocument.uri}`);
-
-  // TODO: Implement document symbol functionality
-  return [];
-});
-
-connection.onWorkspaceSymbol((params: WorkspaceSymbolParams) => {
-  console.log(`Workspace symbol request: ${params.query}`);
-
-  // TODO: Implement workspace symbol functionality
-  return [];
-});
-
-// Make the text document manager listen on the connection
-// for open, change, and close text document events
-documents.listen(connection);
-
-// Listen on the connection
-connection.listen();
+    return null;
+  }
+}

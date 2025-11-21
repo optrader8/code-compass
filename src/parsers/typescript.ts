@@ -11,6 +11,9 @@ import {
   TextChange,
   CodeNode,
   Range,
+  FunctionDeclaration,
+  ClassDeclaration,
+  ImportStatement,
 } from '../types/ast';
 
 export class TypeScriptParser extends BaseParser {
@@ -62,6 +65,8 @@ export class TypeScriptParser extends BaseParser {
       classes: [],
     };
 
+    this.populateSymbols(ast);
+
     return ast;
   }
 
@@ -82,6 +87,131 @@ export class TypeScriptParser extends BaseParser {
     }
 
     return matches;
+  }
+
+  private populateSymbols(ast: ParsedAST): void {
+    if (!ast.tree) return;
+    const functions: FunctionDeclaration[] = [];
+    const classes: ClassDeclaration[] = [];
+    const imports: ImportStatement[] = [];
+
+    const stack: SyntaxNode[] = [ast.tree.rootNode];
+    while (stack.length) {
+      const node = stack.pop();
+      if (!node) continue;
+
+      switch (node.type) {
+        case 'function_declaration':
+          functions.push(this.toFunction(node));
+          break;
+        case 'method_definition':
+          functions.push(this.toFunction(node, true));
+          break;
+        case 'class_declaration':
+          classes.push(this.toClass(node));
+          break;
+        case 'import_statement':
+          imports.push(this.toImport(node));
+          break;
+        default:
+          break;
+      }
+
+      stack.push(...node.namedChildren);
+    }
+
+    ast.functions = functions;
+    ast.classes = classes;
+    ast.imports = imports;
+  }
+
+  private toFunction(node: SyntaxNode, isMethod: boolean = false): FunctionDeclaration {
+    const nameNode = node.childForFieldName('name') || node.child(1);
+    const name = nameNode ? nameNode.text : '(anonymous)';
+    const paramsNode = node.childForFieldName('parameters');
+    const parameters =
+      paramsNode?.namedChildren
+        .filter(
+          child =>
+            child.type === 'required_parameter' ||
+            child.type === 'identifier' ||
+            child.type === 'rest_parameter'
+        )
+        .map(child => ({ name: child.text })) ?? [];
+
+    return {
+      name,
+      parameters,
+      returnType: undefined,
+      isAsync: !!node.childForFieldName('async'),
+      isExported: this.isExported(node),
+      range: this.toRange(node),
+    };
+  }
+
+  private toClass(node: SyntaxNode): ClassDeclaration {
+    const nameNode = node.childForFieldName('name') || node.child(1);
+    const name = nameNode ? nameNode.text : '(anonymous)';
+    const methods = node.namedChildren
+      .filter(child => child.type === 'method_definition')
+      .map(child => this.toFunction(child, true));
+
+    const cls: ClassDeclaration = {
+      name,
+      methods,
+      properties: [],
+      range: this.toRange(node),
+    };
+    return cls;
+  }
+
+  private toImport(node: SyntaxNode): ImportStatement {
+    const sourceNode = node.childForFieldName('source');
+    const specifierNodes = node.namedChildren.filter(
+      child =>
+        child.type === 'import_clause' ||
+        child.type === 'named_imports' ||
+        child.type === 'identifier'
+    );
+    const imports = specifierNodes.flatMap(child =>
+      child.namedChildren
+        .filter(
+          c => c.type === 'import_specifier' || c.type === 'identifier'
+        )
+        .map(c => ({ name: c.text }))
+    );
+
+    const imp: ImportStatement = {
+      source: sourceNode ? sourceNode.text.replace(/['"]/g, '') : '',
+      imports,
+      isDefault: imports.length === 0,
+      range: this.toRange(node),
+    };
+    return imp;
+  }
+
+  private toRange(node: SyntaxNode): Range {
+    return {
+      start: {
+        line: node.startPosition.row,
+        character: node.startPosition.column,
+      },
+      end: {
+        line: node.endPosition.row,
+        character: node.endPosition.column,
+      },
+    };
+  }
+
+  private isExported(node: SyntaxNode): boolean {
+    const parent = node.parent;
+    if (!parent) return false;
+    return parent.children.some(
+      child =>
+        child.type === 'export' ||
+        child.type === 'export_statement' ||
+        child.type === 'export_clause'
+    );
   }
 
   extractMetadata(node: CodeNode): any {

@@ -19,15 +19,15 @@ export class FileWatcher extends EventEmitter {
   private watchedPaths: Set<string> = new Set();
   private fileHashes: Map<string, string> = new Map();
   private intervalId?: NodeJS.Timeout;
-  private options: WatcherOptions;
+  private options: Required<WatcherOptions>;
   private stopRequested: boolean = false;
 
   constructor(options: WatcherOptions = {}) {
     super();
     this.options = {
-      interval: options.interval || 2000, // default to 2 seconds
-      ignoreInitial: options.ignoreInitial || true,
-      ignore: options.ignore || [],
+      interval: options.interval ?? 2000, // default to 2 seconds
+      ignoreInitial: options.ignoreInitial ?? true,
+      ignore: options.ignore ?? [],
     };
   }
 

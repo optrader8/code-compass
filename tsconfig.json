@@ -2,7 +2,7 @@
   "compilerOptions": {
     "target": "ES2020",
     "module": "commonjs",
-    "lib": ["ES2020"],
+    "lib": ["ES2020", "DOM"],
     "outDir": "./dist",
     "rootDir": "./src",
     "strict": true,
@@ -20,6 +20,8 @@
     "noImplicitReturns": true,
     "noFallthroughCasesInSwitch": true,
     "moduleResolution": "node",
+    "allowJs": true,
+    "jsx": "react-jsx",
     "baseUrl": "./",
     "paths": {
       "@src/*": ["src/*"],
@@ -27,17 +29,19 @@
       "@core/*": ["src/core/*"],
       "@parsers/*": ["src/parsers/*"],
       "@utils/*": ["src/utils/*"],
-      "@types/*": ["src/types/*"]
+      "@types/*": ["src/types/*"],
+      "@ui/*": ["src/ui/*"]
     },
     "typeRoots": ["node_modules/@types"],
     "resolveJsonModule": true
   },
   "include": [
-    "src/**/*"
+    "src/**/*.ts"
   ],
   "exclude": [
     "node_modules",
     "dist",
-    "tests"
+    "tests",
+    "src/ui/**"
   ]
 }

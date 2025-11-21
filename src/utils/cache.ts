@@ -123,12 +123,15 @@ export class CacheSystem {
   }
 
   async has(key: string): Promise<boolean> {
-    return (
-      this.memoryCache.has(key) ||
-      (this.enableDiskCache &&
-        this.diskCachePath &&
-        fs.existsSync(path.join(this.diskCachePath, `${key}.json`)))
-    );
+    if (this.memoryCache.has(key)) {
+      return true;
+    }
+
+    if (this.enableDiskCache && this.diskCachePath) {
+      return fs.existsSync(path.join(this.diskCachePath, `${key}.json`));
+    }
+
+    return false;
   }
 
   async delete(key: string): Promise<boolean> {

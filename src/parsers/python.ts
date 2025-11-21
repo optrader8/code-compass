@@ -10,6 +10,9 @@ import {
   TextChange,
   CodeNode,
   Range,
+  FunctionDeclaration,
+  ClassDeclaration,
+  ImportStatement,
 } from '../types/ast';
 
 export class PythonParser extends BaseParser {
@@ -30,7 +33,7 @@ export class PythonParser extends BaseParser {
     const tree = this.parser.parse(content);
     const hash = createHash('sha1').update(content).digest('hex');
 
-    return {
+    const ast: ParsedAST = {
       language: Language.Python,
       filePath: '',
       content,
@@ -43,6 +46,9 @@ export class PythonParser extends BaseParser {
       functions: [],
       classes: [],
     };
+
+    this.populateSymbols(ast);
+    return ast;
   }
 
   query(ast: ParsedAST, query: ASTQuery): CodeNode[] {
@@ -93,6 +99,110 @@ export class PythonParser extends BaseParser {
       tree: updatedTree,
       hash,
       timestamp: Date.now(),
+    };
+  }
+
+  private populateSymbols(ast: ParsedAST): void {
+    if (!ast.tree) return;
+    const functions: FunctionDeclaration[] = [];
+    const classes: ClassDeclaration[] = [];
+    const imports: ImportStatement[] = [];
+
+    const stack: SyntaxNode[] = [ast.tree.rootNode];
+    while (stack.length) {
+      const node = stack.pop();
+      if (!node) continue;
+
+      switch (node.type) {
+        case 'function_definition':
+          functions.push(this.toFunction(node));
+          break;
+        case 'class_definition':
+          classes.push(this.toClass(node));
+          break;
+        case 'import_statement':
+        case 'import_from_statement':
+          imports.push(this.toImport(node));
+          break;
+        default:
+          break;
+      }
+
+      stack.push(...node.namedChildren);
+    }
+
+    ast.functions = functions;
+    ast.classes = classes;
+    ast.imports = imports;
+  }
+
+  private toFunction(node: SyntaxNode): FunctionDeclaration {
+    const nameNode = node.childForFieldName('name') || node.child(1);
+    const name = nameNode ? nameNode.text : '(anonymous)';
+    const paramsNode = node.childForFieldName('parameters');
+    const parameters =
+      paramsNode?.namedChildren
+        .filter(child => child.type === 'identifier')
+        .map(child => ({ name: child.text })) ?? [];
+
+    return {
+      name,
+      parameters,
+      isAsync: !!node.childForFieldName('async'),
+      isExported: false,
+      range: this.toRange(node),
+    };
+  }
+
+  private toClass(node: SyntaxNode): ClassDeclaration {
+    const nameNode = node.childForFieldName('name') || node.child(1);
+    const name = nameNode ? nameNode.text : '(anonymous)';
+    const methods = node.namedChildren
+      .filter(child => child.type === 'function_definition')
+      .map(child => this.toFunction(child));
+
+    return {
+      name,
+      methods,
+      properties: [],
+      range: this.toRange(node),
+    };
+  }
+
+  private toImport(node: SyntaxNode): ImportStatement {
+    const sourceNode =
+      node.type === 'import_from_statement'
+        ? node.childForFieldName('module_name')
+        : node.childForFieldName('name');
+
+    const specifiers =
+      node.namedChildren
+        .filter(
+          child =>
+            child.type === 'aliased_import' ||
+            child.type === 'dotted_name' ||
+            child.type === 'identifier'
+        )
+        .map(child => ({ name: child.text })) ?? [];
+
+    return {
+      source: sourceNode ? sourceNode.text.replace(/['"]/g, '') : '',
+      imports: specifiers,
+      isDefault: false,
+      range: this.toRange(node),
+    };
+  }
+
+  private toRange(node: SyntaxNode): Range {
+    return {
+      start: {
+        line: node.startPosition.row,
+        character: node.startPosition.column,
+      },
+      end: {
+        line: node.endPosition.row,
+        character: node.endPosition.column,
+      },
     };
   }
 
